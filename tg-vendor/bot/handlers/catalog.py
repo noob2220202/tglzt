@@ -16,21 +16,34 @@ router = Router(name="catalog")
 
 
 async def _load_items() -> list[dict[str, Any]]:
-    """Read fresh items from inventory_cache (written by inventory worker)."""
+    """Read items from inventory_cache (written by inventory worker).
+    Shows items seen within the last 10 minutes."""
     async with get_conn() as db:
         rows = await (
             await db.execute(
                 """
                 SELECT item_id, category, price_usd, sell_price, country,
-                       premium, spam_block, title, raw_json
+                       premium, spam_block, title, raw_json, last_seen
                 FROM inventory_cache
-                WHERE last_seen > datetime('now', '-5 minutes')
+                WHERE last_seen > datetime('now', '-10 minutes')
                 ORDER BY last_seen DESC
                 LIMIT 200
                 """
             )
         ).fetchall()
-    return [dict(r) for r in rows]
+    items = []
+    for r in rows:
+        item = dict(r)
+        # raw_json에 상세 정보가 있으면 병합
+        if item.get("raw_json"):
+            try:
+                extra = json.loads(item["raw_json"])
+                item.setdefault("description", extra.get("description", ""))
+                item.setdefault("created", extra.get("created", ""))
+            except Exception:
+                pass
+        items.append(item)
+    return items
 
 
 @router.message(F.text == "🛒 매물보기")

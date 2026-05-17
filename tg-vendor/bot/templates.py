@@ -3,6 +3,11 @@ from decimal import Decimal
 from typing import Any
 
 
+def _d(v: Any) -> Decimal:
+    """Convert any numeric-ish value (str, float, int, Decimal) to Decimal."""
+    return Decimal(str(v)) if not isinstance(v, Decimal) else v
+
+
 def msg_welcome_new() -> str:
     return (
         "💎 <b>텔레그램 계정 자판기</b>\n\n"
@@ -55,20 +60,22 @@ def msg_address_duplicate() -> str:
     )
 
 
-def msg_home(username: str, balance: Decimal, total_orders: int) -> str:
+def msg_home(username: str, balance: Any, total_orders: int) -> str:
     display = username or "사용자"
+    bal = _d(balance)
     return (
         "💎 <b>텔레그램 계정 자판기</b>\n\n"
         "<blockquote>"
         f"👤 {display}\n"
-        f"💰 잔액: <b>{balance:.4f} USDT</b>\n"
+        f"💰 잔액: <b>{bal:.4f} USDT</b>\n"
         f"📦 누적 구매: {total_orders}건"
         "</blockquote>\n\n"
         "<i>아래 메뉴에서 시작하세요</i>"
     )
 
 
-def msg_deposit_info(deposit_addr: str, sender_addr: str, balance: Decimal) -> str:
+def msg_deposit_info(deposit_addr: str, sender_addr: str, balance: Any) -> str:
+    bal = _d(balance)
     return (
         "💰 <b>USDT TRC20 충전</b>\n\n"
         "<blockquote>📥 입금 주소\n"
@@ -79,19 +86,20 @@ def msg_deposit_info(deposit_addr: str, sender_addr: str, balance: Decimal) -> s
         "<i>반드시 위 등록 주소에서만 보내주세요\n"
         "다른 주소에서 보내면 자동인식 안 됩니다\n"
         "TRC20 네트워크 필수</i>\n\n"
-        f"💎 <b>현재 잔액: {balance:.4f} USDT</b>\n\n"
+        f"💎 <b>현재 잔액: {bal:.4f} USDT</b>\n\n"
         "⏳ <i>입금 확인 보통 1~3분\n"
         "컨펌 즉시 자동 반영</i>"
     )
 
 
-def msg_deposit_confirmed(amount: Decimal, balance: Decimal, tx_hash: str) -> str:
+def msg_deposit_confirmed(amount: Any, balance: Any, tx_hash: str) -> str:
+    amt, bal = _d(amount), _d(balance)
     short_hash = tx_hash[:16] + "..." if len(tx_hash) > 16 else tx_hash
     return (
         "✅ <b>입금이 확인되었습니다</b>\n\n"
         "<blockquote>"
-        f"💎 입금액: <b>{amount:.4f} USDT</b>\n"
-        f"💰 현재 잔액: {balance:.4f} USDT\n"
+        f"💎 입금액: <b>{amt:.4f} USDT</b>\n"
+        f"💰 현재 잔액: {bal:.4f} USDT\n"
         f"🔗 TX: <code>{short_hash}</code>"
         "</blockquote>\n\n"
         "🛒 매물보기 버튼으로 구매를 시작하세요"
@@ -106,9 +114,10 @@ def msg_item_list_header(total: int) -> str:
     )
 
 
-def msg_item_detail(item: dict[str, Any], balance: Decimal) -> str:
+def msg_item_detail(item: dict[str, Any], balance: Any) -> str:
     country = item.get("country", "알 수 없음")
-    price = item.get("sell_price", Decimal("0"))
+    price = _d(item.get("sell_price", "0"))
+    bal = _d(balance)
     premium = "있음" if item.get("premium") else "없음"
     spam = "있음" if item.get("spam_block") else "없음"
     created = item.get("created", "")
@@ -125,7 +134,7 @@ def msg_item_detail(item: dict[str, Any], balance: Decimal) -> str:
         f"📝 설명: {desc}"
         "</blockquote>\n\n"
         f"💰 <b>가격: {price:.2f} USDT</b>\n"
-        f"<i>현재 잔액: {balance:.4f} USDT</i>"
+        f"<i>현재 잔액: {bal:.4f} USDT</i>"
     )
 
 
@@ -162,27 +171,29 @@ def msg_delivered(
     )
 
 
-def msg_insufficient_balance(price: Decimal, balance: Decimal) -> str:
-    diff = price - balance
+def msg_insufficient_balance(price: Any, balance: Any) -> str:
+    p, bal = _d(price), _d(balance)
+    diff = p - bal
     return (
         "❌ <b>잔액이 부족합니다</b>\n\n"
         "<blockquote>"
-        f"필요 금액: {price:.2f} USDT\n"
-        f"현재 잔액: {balance:.4f} USDT\n"
+        f"필요 금액: {p:.2f} USDT\n"
+        f"현재 잔액: {bal:.4f} USDT\n"
         f"부족분: <b>{diff:.4f} USDT</b>"
         "</blockquote>\n\n"
         "💰 충전하기를 눌러주세요"
     )
 
 
-def msg_purchase_failed(reason: str, order_id: str, balance: Decimal) -> str:
+def msg_purchase_failed(reason: str, order_id: str, balance: Any) -> str:
+    bal = _d(balance)
     return (
         "❌ <b>구매에 실패했습니다</b>\n\n"
         "<blockquote>"
         f"사유: {reason}\n"
         f"주문번호: <code>{order_id}</code>\n\n"
         f"💰 잔액이 자동 환불되었습니다\n"
-        f"현재 잔액: <b>{balance:.4f} USDT</b>"
+        f"현재 잔액: <b>{bal:.4f} USDT</b>"
         "</blockquote>\n\n"
         "<i>다른 매물을 선택해주세요</i>"
     )
