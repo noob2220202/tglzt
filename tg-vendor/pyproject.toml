@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tg-vendor"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "aiogram>=3.13,<4.0",
     "aiosqlite>=0.20,<1.0",
