@@ -59,7 +59,14 @@ CREATE TABLE IF NOT EXISTS tron_cursor (
     last_block_ts INTEGER NOT NULL DEFAULT 0,
     updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
-INSERT OR IGNORE INTO tron_cursor (id, last_block_ts) VALUES (1, 0);
+-- 최초 생성 시 현재 시간으로 초기화 (과거 내역 조회 방지)
+INSERT OR IGNORE INTO tron_cursor (id, last_block_ts)
+  VALUES (1, CAST((strftime('%s','now')) * 1000 AS INTEGER));
+
+CREATE TABLE IF NOT EXISTS deposit_sessions (
+    user_id    INTEGER PRIMARY KEY,
+    expires_at TEXT    NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS inventory_cache (
     item_id    INTEGER PRIMARY KEY,

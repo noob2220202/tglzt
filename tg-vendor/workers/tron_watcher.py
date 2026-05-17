@@ -1,6 +1,7 @@
-"""Polls TronGrid for USDT deposits and credits matched users."""
+"""Polls TronGrid only when users are actively waiting for deposits."""
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -17,12 +18,34 @@ logger = structlog.get_logger(__name__)
 REORG_BUFFER_MS = 60_000
 
 
+async def _has_active_sessions() -> bool:
+    """Return True if at least one user is waiting for a deposit."""
+    async with get_conn() as db:
+        row = await (
+            await db.execute(
+                "SELECT COUNT(*) FROM deposit_sessions WHERE expires_at > datetime('now')"
+            )
+        ).fetchone()
+    return row[0] > 0
+
+
+async def _cleanup_expired_sessions() -> None:
+    async with get_conn() as db:
+        await db.execute("DELETE FROM deposit_sessions WHERE expires_at <= datetime('now')")
+        await db.commit()
+
+
 async def _load_cursor() -> int:
     async with get_conn() as db:
         row = await (
             await db.execute("SELECT last_block_ts FROM tron_cursor WHERE id = 1")
         ).fetchone()
-    return int(row["last_block_ts"]) if row else 0
+    ts = int(row["last_block_ts"]) if row else 0
+    # Safety: never start from epoch — set to now if somehow 0
+    if ts == 0:
+        ts = int(time.time() * 1000) - 60_000
+        await _save_cursor(ts)
+    return ts
 
 
 async def _save_cursor(ts_ms: int) -> None:
@@ -81,6 +104,12 @@ async def _notify_admins(text: str) -> None:
                 logger.warning("admin_notify_failed", admin_id=admin_id, error=str(exc))
 
 
+async def _remove_deposit_session(user_id: int) -> None:
+    async with get_conn() as db:
+        await db.execute("DELETE FROM deposit_sessions WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
 async def poll_once(tron: TronGridClient) -> None:
     cursor = await _load_cursor()
     min_ts = max(0, cursor - REORG_BUFFER_MS)
@@ -107,24 +136,19 @@ async def poll_once(tron: TronGridClient) -> None:
         if block_ts > max_ts:
             max_ts = block_ts
 
-        # Find user by sender_address
         async with get_conn() as db:
             user = await (
                 await db.execute(
-                    "SELECT tg_id, balance_usdt FROM users WHERE LOWER(sender_address) = LOWER(?)",
+                    "SELECT tg_id FROM users WHERE LOWER(sender_address) = LOWER(?)",
                     (from_addr,),
                 )
             ).fetchone()
 
         if user is None:
+            # 미등록 주소는 DB에만 기록, 어드민 알림은 보내지 않음
+            # (어드민은 /admin_unmatched 명령어로 확인)
             await _log_unmatched(tx_hash, from_addr, amount, block_ts, tx)
-            await _notify_admins(
-                f"⚠️ <b>미매칭 입금 감지</b>\n\n"
-                f"주소: <code>{from_addr}</code>\n"
-                f"금액: {amount} USDT\n"
-                f"TX: <code>{tx_hash}</code>\n\n"
-                f"/match_deposit {tx_hash} &lt;tg_id&gt;"
-            )
+            logger.info("unmatched_deposit", from_addr=from_addr, amount=str(amount))
             continue
 
         credited = await credit_deposit(
@@ -137,7 +161,6 @@ async def poll_once(tron: TronGridClient) -> None:
         )
 
         if credited:
-            # Get updated balance
             async with get_conn() as db:
                 row = await (
                     await db.execute(
@@ -155,6 +178,7 @@ async def poll_once(tron: TronGridClient) -> None:
                 f"🔗 TX: <code>{short_hash}</code></blockquote>\n\n"
                 f"🛒 매물보기 버튼으로 구매를 시작하세요",
             )
+            await _remove_deposit_session(user["tg_id"])
             logger.info("deposit_credited", user_id=user["tg_id"], amount=str(amount))
 
     if max_ts > cursor:
@@ -176,10 +200,16 @@ async def run() -> None:
     logger.info("tron_watcher_started", poll_sec=settings.tron_poll_sec)
     try:
         while True:
-            try:
-                await poll_once(tron)
-            except Exception as exc:
-                logger.error("poll_error", error=str(exc), exc_info=True)
+            await _cleanup_expired_sessions()
+
+            if await _has_active_sessions():
+                try:
+                    await poll_once(tron)
+                except Exception as exc:
+                    logger.error("poll_error", error=str(exc), exc_info=True)
+            else:
+                logger.info("no_active_sessions_skipping")
+
             await asyncio.sleep(settings.tron_poll_sec)
     finally:
         await tron.aclose()

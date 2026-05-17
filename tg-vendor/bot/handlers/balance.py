@@ -9,9 +9,26 @@ from bot.keyboards import kb_deposit
 from bot.templates import msg_deposit_info, msg_not_registered
 from core.balance import get_user
 from core.config import settings
+from core.db import get_conn
 
 logger = structlog.get_logger(__name__)
 router = Router(name="balance")
+
+SESSION_MINUTES = 30
+
+
+async def register_deposit_session(user_id: int) -> None:
+    """Mark user as actively waiting for a deposit (30 min window)."""
+    async with get_conn() as db:
+        await db.execute(
+            """
+            INSERT INTO deposit_sessions (user_id, expires_at)
+            VALUES (?, datetime('now', '+30 minutes'))
+            ON CONFLICT(user_id) DO UPDATE SET expires_at = excluded.expires_at
+            """,
+            (user_id,),
+        )
+        await db.commit()
 
 
 def _make_qr(data: str) -> BufferedInputFile:
@@ -27,6 +44,8 @@ async def _send_deposit_info(message: Message, user_id: int) -> None:
     if user is None:
         await message.answer(msg_not_registered())
         return
+
+    await register_deposit_session(user_id)
 
     text = msg_deposit_info(
         deposit_addr=settings.deposit_address,
@@ -55,6 +74,8 @@ async def cb_balance_refresh(callback: CallbackQuery) -> None:
     if user is None:
         await callback.message.answer(msg_not_registered())
         return
+
+    await register_deposit_session(callback.from_user.id)
 
     text = msg_deposit_info(
         deposit_addr=settings.deposit_address,
