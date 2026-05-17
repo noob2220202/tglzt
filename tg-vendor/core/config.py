@@ -12,8 +12,7 @@ class Settings(BaseSettings):
     trongrid_api_key: str
     deposit_address: str
     usdt_contract: str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-    db_url: str
-    redis_url: str
+    db_path: str = "./data/vendor.db"
     markup_pct: Decimal = Decimal("0.25")
     inventory_refresh_sec: int = 30
     tron_poll_sec: int = 30

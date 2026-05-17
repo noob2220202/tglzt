@@ -1,15 +1,15 @@
-from datetime import datetime, timezone
+import uuid
 from decimal import Decimal
 from typing import Any
 
-import asyncpg
 import structlog
+
+from core.db import get_conn
 
 logger = structlog.get_logger(__name__)
 
 
 async def credit_deposit(
-    pool: asyncpg.Pool,
     user_id: int,
     tx_hash: str,
     from_address: str,
@@ -17,100 +17,98 @@ async def credit_deposit(
     amount: Decimal,
     block_ts_ms: int,
 ) -> bool:
-    """Credit a deposit atomically. Returns False if tx_hash already processed."""
-    block_dt = datetime.fromtimestamp(block_ts_ms / 1000, tz=timezone.utc)
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO deposits (user_id, tx_hash, from_address, to_address,
-                                         amount, block_ts)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    """,
-                    user_id,
-                    tx_hash,
-                    from_address,
-                    to_address,
-                    amount,
-                    block_dt,
-                )
-            except asyncpg.UniqueViolationError:
-                return False
+    """Credit deposit atomically. Returns False if tx_hash already processed."""
+    from datetime import datetime, timezone
+    block_dt = datetime.fromtimestamp(block_ts_ms / 1000, tz=timezone.utc).isoformat()
 
-            await conn.execute(
-                "UPDATE users SET balance_usdt = balance_usdt + $1 WHERE tg_id = $2",
-                amount,
-                user_id,
-            )
-    logger.info("deposit credited", user_id=user_id, amount=str(amount), tx_hash=tx_hash)
+    async with get_conn() as db:
+        # Try to insert deposit (UNIQUE on tx_hash)
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO deposits
+              (id, user_id, tx_hash, from_address, to_address, amount, block_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), user_id, tx_hash, from_address, to_address, str(amount), block_dt),
+        )
+        if cursor.rowcount == 0:
+            return False  # duplicate
+
+        await db.execute(
+            "UPDATE users SET balance_usdt = CAST(CAST(balance_usdt AS REAL) + ? AS TEXT) WHERE tg_id = ?",
+            (float(amount), user_id),
+        )
+        await db.commit()
+
+    logger.info("deposit_credited", user_id=user_id, amount=str(amount), tx_hash=tx_hash)
     return True
 
 
-async def debit_balance(
-    conn: asyncpg.Connection,
-    user_id: int,
-    amount: Decimal,
-) -> bool:
-    """Deduct amount from user balance inside an existing transaction. Returns False if insufficient."""
-    row = await conn.fetchrow(
-        "SELECT balance_usdt FROM users WHERE tg_id = $1 FOR UPDATE",
-        user_id,
-    )
-    if row is None or row["balance_usdt"] < amount:
-        return False
-    await conn.execute(
-        "UPDATE users SET balance_usdt = balance_usdt - $1 WHERE tg_id = $2",
-        amount,
-        user_id,
-    )
-    return True
+async def debit_balance(user_id: int, amount: Decimal) -> bool:
+    """Atomically debit balance. Returns False if insufficient.
+    Uses UPDATE ... WHERE balance_usdt >= amount for atomic check-and-deduct."""
+    async with get_conn() as db:
+        cursor = await db.execute(
+            """
+            UPDATE users
+            SET balance_usdt = CAST(CAST(balance_usdt AS REAL) - ? AS TEXT),
+                total_spent   = CAST(CAST(total_spent AS REAL) + ? AS TEXT)
+            WHERE tg_id = ? AND CAST(balance_usdt AS REAL) >= ?
+            """,
+            (float(amount), float(amount), user_id, float(amount)),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
-async def refund_order(pool: asyncpg.Pool, order_id: str) -> Decimal:
-    """Refund order price to user. Marks order as REFUNDED. Returns refunded amount."""
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            order = await conn.fetchrow(
-                "SELECT user_id, price_paid, status FROM orders WHERE id = $1 FOR UPDATE",
-                order_id,
+async def refund_order(order_id: str) -> Decimal:
+    """Refund order price to user. Returns refunded amount."""
+    async with get_conn() as db:
+        row = await (
+            await db.execute(
+                "SELECT user_id, price_paid, status FROM orders WHERE id = ?", (order_id,)
             )
-            if order is None or order["status"] not in ("PENDING", "PURCHASING", "FAILED"):
-                return Decimal("0")
+        ).fetchone()
 
-            amount = order["price_paid"]
-            await conn.execute(
-                "UPDATE orders SET status = 'REFUNDED' WHERE id = $1",
-                order_id,
-            )
-            await conn.execute(
-                "UPDATE users SET balance_usdt = balance_usdt + $1 WHERE tg_id = $2",
-                amount,
-                order["user_id"],
-            )
-    logger.info("order refunded", order_id=order_id, amount=str(amount))
+        if row is None or row["status"] not in ("PENDING", "PURCHASING", "FAILED"):
+            return Decimal("0")
+
+        amount = Decimal(row["price_paid"])
+        await db.execute(
+            "UPDATE orders SET status = 'REFUNDED' WHERE id = ?", (order_id,)
+        )
+        await db.execute(
+            "UPDATE users SET balance_usdt = CAST(CAST(balance_usdt AS REAL) + ? AS TEXT) WHERE tg_id = ?",
+            (float(amount), row["user_id"]),
+        )
+        await db.commit()
+
+    logger.info("order_refunded", order_id=order_id, amount=str(amount))
     return amount
 
 
-async def get_balance(pool: asyncpg.Pool, user_id: int) -> Decimal:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT balance_usdt FROM users WHERE tg_id = $1",
-            user_id,
-        )
-    return row["balance_usdt"] if row else Decimal("0")
+async def get_balance(user_id: int) -> Decimal:
+    async with get_conn() as db:
+        row = await (
+            await db.execute("SELECT balance_usdt FROM users WHERE tg_id = ?", (user_id,))
+        ).fetchone()
+    return Decimal(row["balance_usdt"]) if row else Decimal("0")
 
 
-async def get_user(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | None:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE tg_id = $1", user_id)
+async def get_user(user_id: int) -> dict[str, Any] | None:
+    async with get_conn() as db:
+        row = await (
+            await db.execute("SELECT * FROM users WHERE tg_id = ?", (user_id,))
+        ).fetchone()
     return dict(row) if row else None
 
 
-async def count_user_orders(pool: asyncpg.Pool, user_id: int) -> int:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT COUNT(*) AS cnt FROM orders WHERE user_id = $1 AND status = 'DELIVERED'",
-            user_id,
-        )
+async def count_user_orders(user_id: int) -> int:
+    async with get_conn() as db:
+        row = await (
+            await db.execute(
+                "SELECT COUNT(*) AS cnt FROM orders WHERE user_id = ? AND status = 'DELIVERED'",
+                (user_id,),
+            )
+        ).fetchone()
     return row["cnt"] if row else 0

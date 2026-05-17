@@ -5,14 +5,12 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
-import redis.asyncio as aioredis
 
 from bot.handlers import admin, balance, catalog, orders, purchase, start
-from core.cache import init_redis, close_redis
 from core.config import settings
-from core.db import close_pool, init_pool
+from core.db import init_db
 
 logger = structlog.get_logger(__name__)
 
@@ -23,7 +21,6 @@ def _configure_logging() -> None:
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.add_log_level,
             structlog.stdlib.add_logger_name,
-            structlog.processors.StackInfoRenderer(),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -32,8 +29,7 @@ def _configure_logging() -> None:
 
 
 async def on_startup(bot: Bot) -> None:
-    await init_pool()
-    await init_redis()
+    await init_db()
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="시작 / 가입"),
@@ -45,26 +41,16 @@ async def on_startup(bot: Bot) -> None:
     logger.info("bot_started")
 
 
-async def on_shutdown(bot: Bot) -> None:
-    await close_redis()
-    await close_pool()
-    logger.info("bot_stopped")
-
-
 async def main() -> None:
     _configure_logging()
-
-    redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
-    storage = RedisStorage(redis=redis_client)
 
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    dp = Dispatcher(storage=storage)
+    dp = Dispatcher(storage=MemoryStorage())
 
-    # Admin router first — its filter takes priority
     dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(balance.router)
@@ -73,7 +59,6 @@ async def main() -> None:
     dp.include_router(orders.router)
 
     dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
 
     logger.info("starting_polling")
     await dp.start_polling(

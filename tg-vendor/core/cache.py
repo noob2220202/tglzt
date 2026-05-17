@@ -1,59 +1,47 @@
-import json
+"""In-memory TTL cache (per-process). No Redis required."""
+import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-import redis.asyncio as aioredis
-
-from core.config import settings
-
-_redis: aioredis.Redis | None = None
+_store: dict[str, tuple[Any, float]] = {}  # key → (value, expires_at)
 
 
-async def init_redis() -> aioredis.Redis:
-    global _redis
-    _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-    return _redis
-
-
-async def close_redis() -> None:
-    global _redis
-    if _redis:
-        await _redis.aclose()
-        _redis = None
-
-
-def get_redis() -> aioredis.Redis:
-    if _redis is None:
-        raise RuntimeError("Redis not initialized")
-    return _redis
-
-
-async def cache_get(key: str) -> Any | None:
-    raw = await get_redis().get(key)
-    if raw is None:
+def cache_get(key: str) -> Any | None:
+    entry = _store.get(key)
+    if entry is None:
         return None
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
+    value, expires_at = entry
+    if time.monotonic() > expires_at:
+        _store.pop(key, None)
+        return None
+    return value
 
 
-async def cache_set(key: str, value: Any, ttl_sec: int) -> None:
-    serialized = json.dumps(value) if not isinstance(value, str) else value
-    await get_redis().set(key, serialized, ex=ttl_sec)
+def cache_set(key: str, value: Any, ttl_sec: int) -> None:
+    _store[key] = (value, time.monotonic() + ttl_sec)
 
 
-async def cache_delete(key: str) -> None:
-    await get_redis().delete(key)
+def cache_delete(key: str) -> None:
+    _store.pop(key, None)
+
+
+# Per-user asyncio locks for purchase dedup (bot process only)
+_user_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 
 @asynccontextmanager
-async def acquire_lock(key: str, ttl_ms: int = 5000) -> AsyncIterator[bool]:
-    """SET NX PX lock. Yields True if acquired, False otherwise."""
-    r = get_redis()
-    acquired = await r.set(key, "1", px=ttl_ms, nx=True)
-    try:
-        yield bool(acquired)
-    finally:
-        if acquired:
-            await r.delete(key)
+async def acquire_user_lock(user_id: int) -> AsyncIterator[bool]:
+    """Yields True if lock acquired immediately, False if already held."""
+    lock = _get_lock(user_id)
+    if lock.locked():
+        yield False
+        return
+    async with lock:
+        yield True

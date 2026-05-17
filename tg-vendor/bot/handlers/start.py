@@ -16,7 +16,7 @@ from bot.templates import (
     msg_welcome_new,
 )
 from core.balance import count_user_orders, get_user
-from core.db import get_pool
+from core.db import get_conn
 from core.tron import validate_trc20_address
 
 logger = structlog.get_logger(__name__)
@@ -26,13 +26,13 @@ router = Router(name="start")
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    user = await get_user(get_pool(), message.from_user.id)
+    user = await get_user(message.from_user.id)
 
     if user is None:
         await message.answer(msg_welcome_new(), reply_markup=kb_register())
         return
 
-    total = await count_user_orders(get_pool(), message.from_user.id)
+    total = await count_user_orders(message.from_user.id)
     await message.answer(
         msg_home(
             username=message.from_user.username or message.from_user.first_name or "",
@@ -69,40 +69,35 @@ async def process_address_input(message: Message, state: FSMContext) -> None:
         await message.answer(msg_address_error(), reply_markup=kb_cancel())
         return
 
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        existing = await conn.fetchrow(
-            "SELECT tg_id FROM users WHERE sender_address = $1", addr
-        )
-        if existing and existing["tg_id"] != message.from_user.id:
+    async with get_conn() as db:
+        row = await (
+            await db.execute(
+                "SELECT tg_id FROM users WHERE sender_address = ?", (addr,)
+            )
+        ).fetchone()
+
+        if row and row["tg_id"] != message.from_user.id:
             await message.answer(msg_address_duplicate(), reply_markup=kb_cancel())
             return
 
-        user = await conn.fetchrow(
-            "SELECT tg_id FROM users WHERE tg_id = $1", message.from_user.id
-        )
-        if user is None:
-            await conn.execute(
-                """
-                INSERT INTO users (tg_id, username, sender_address)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (tg_id) DO UPDATE
-                  SET sender_address = EXCLUDED.sender_address,
-                      username = EXCLUDED.username
-                """,
+        await db.execute(
+            """
+            INSERT INTO users (tg_id, username, sender_address)
+            VALUES (?, ?, ?)
+            ON CONFLICT(tg_id) DO UPDATE
+              SET sender_address = excluded.sender_address,
+                  username = excluded.username
+            """,
+            (
                 message.from_user.id,
                 message.from_user.username or message.from_user.first_name,
                 addr,
-            )
-        else:
-            await conn.execute(
-                "UPDATE users SET sender_address = $1 WHERE tg_id = $2",
-                addr,
-                message.from_user.id,
-            )
+            ),
+        )
+        await db.commit()
 
     await state.clear()
-    logger.info("address registered", user_id=message.from_user.id, address=addr)
+    logger.info("address_registered", user_id=message.from_user.id, address=addr)
     await message.answer(msg_address_success(addr), reply_markup=kb_main())
 
 

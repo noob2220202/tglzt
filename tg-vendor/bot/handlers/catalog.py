@@ -9,32 +9,33 @@ from aiogram.types import CallbackQuery, Message
 from bot.keyboards import kb_item_detail, kb_item_list
 from bot.templates import msg_item_detail, msg_item_list_header, msg_not_registered
 from core.balance import get_user
-from core.cache import cache_get
-from core.db import get_pool
+from core.db import get_conn
 
 logger = structlog.get_logger(__name__)
 router = Router(name="catalog")
 
-REDIS_INVENTORY_KEY = "inventory:items"
-
 
 async def _load_items() -> list[dict[str, Any]]:
-    data = await cache_get(REDIS_INVENTORY_KEY)
-    if data is None:
-        return []
-    if isinstance(data, list):
-        return data
-    if isinstance(data, str):
-        try:
-            return json.loads(data)
-        except json.JSONDecodeError:
-            return []
-    return []
+    """Read fresh items from inventory_cache (written by inventory worker)."""
+    async with get_conn() as db:
+        rows = await (
+            await db.execute(
+                """
+                SELECT item_id, category, price_usd, sell_price, country,
+                       premium, spam_block, title, raw_json
+                FROM inventory_cache
+                WHERE last_seen > datetime('now', '-5 minutes')
+                ORDER BY last_seen DESC
+                LIMIT 200
+                """
+            )
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 @router.message(F.text == "🛒 매물보기")
 async def btn_catalog(message: Message) -> None:
-    user = await get_user(get_pool(), message.from_user.id)
+    user = await get_user(message.from_user.id)
     if user is None:
         await message.answer(msg_not_registered())
         return
@@ -72,7 +73,7 @@ async def cb_item_detail(callback: CallbackQuery) -> None:
     await callback.answer()
     item_id = int(callback.data.split(":")[1])
 
-    user = await get_user(get_pool(), callback.from_user.id)
+    user = await get_user(callback.from_user.id)
     if user is None:
         await callback.message.answer(msg_not_registered())
         return
@@ -84,7 +85,7 @@ async def cb_item_detail(callback: CallbackQuery) -> None:
         return
 
     await callback.message.edit_text(
-        msg_item_detail(item, user["balance_usdt"]),
+        msg_item_detail(item, Decimal(str(user["balance_usdt"]))),
         reply_markup=kb_item_detail(item_id),
     )
 
