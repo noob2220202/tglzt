@@ -1,0 +1,56 @@
+version: "3.9"
+
+x-common: &common
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  bot:
+    <<: *common
+    command: python -m bot.main
+
+  inventory_cacher:
+    <<: *common
+    command: python -m workers.inventory
+
+  tron_watcher:
+    <<: *common
+    command: python -m workers.tron_watcher
+
+  purchaser:
+    <<: *common
+    command: python -m workers.purchaser
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vendor
+      POSTGRES_PASSWORD: vendorpass
+      POSTGRES_DB: vendor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vendor -d vendor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
