@@ -3,6 +3,7 @@ set -e
 
 echo "=== 패키지 설치 ==="
 pip3 install -e .
+pip3 install LOLZTEAM  # pyproject.toml로 안 잡힐 경우 대비
 
 echo "=== .env 파일 확인 ==="
 if [ ! -f .env ]; then
