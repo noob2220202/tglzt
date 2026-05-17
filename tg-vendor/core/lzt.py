@@ -36,7 +36,7 @@ class LZTClient:
     @staticmethod
     def _create_api() -> Any:
         try:
-            from LOLZTEAM.API import Forum  # type: ignore[import]
+            from LOLZTEAM import Forum  # type: ignore[import]
             return Forum(token=settings.lzt_token, language="ru")
         except ImportError:
             raise RuntimeError(
