@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any
 
 from aiogram.types import (
@@ -50,7 +51,7 @@ def kb_item_list(items: list[dict[str, Any]], page: int = 0) -> InlineKeyboardMa
 
     for item in page_items:
         item_id = item.get("item_id", 0)
-        price = item.get("sell_price", 0)
+        price = Decimal(str(item.get("sell_price", 0)))
         country = item.get("country", "??")
         premium = "💎" if item.get("premium") else ""
         label = f"📱 {country} {premium} · {price:.2f} USDT"
