@@ -16,16 +16,19 @@ logger = structlog.get_logger(__name__)
 def _enrich_item(raw: dict) -> dict:
     lzt_price = Decimal(str(raw.get("price_usd") or raw.get("price") or "0"))
     sell_price = calc_sell_price(lzt_price)
+    item_id = raw.get("item_id") or raw.get("id")
+    country = raw.get("country") or raw.get("item_origin") or ""
+    title = raw.get("title") or raw.get("subject") or f"Telegram #{item_id}"
     return {
-        "item_id": raw.get("item_id") or raw.get("id"),
-        "category": raw.get("category", "telegram"),
-        "lzt_price_usd": float(lzt_price),
-        "sell_price": float(sell_price),
-        "country": raw.get("country") or raw.get("item_origin") or "",
-        "premium": bool(raw.get("account_premium") or raw.get("premium")),
-        "spam_block": bool(raw.get("is_spam") or raw.get("spam_block")),
-        "title": raw.get("title") or raw.get("subject") or f"Telegram #{raw.get('item_id') or raw.get('id')}",
-        "description": raw.get("description") or "",
+        "item_id": int(item_id) if item_id is not None else None,
+        "category": "telegram",
+        "lzt_price_usd": str(lzt_price),
+        "sell_price": str(sell_price),
+        "country": str(country),
+        "premium": 1 if (raw.get("account_premium") or raw.get("premium")) else 0,
+        "spam_block": 1 if (raw.get("is_spam") or raw.get("spam_block")) else 0,
+        "title": str(title),
+        "description": str(raw.get("description") or ""),
         "created": str(raw.get("account_reg_date") or raw.get("created_at") or ""),
     }
 
@@ -74,16 +77,16 @@ async def refresh_once(lzt: LZTClient) -> None:
                 (
                     item["item_id"],
                     item["category"],
-                    str(item["lzt_price_usd"]),
-                    str(item["sell_price"]),
+                    item["lzt_price_usd"],
+                    item["sell_price"],
                     item["country"],
-                    int(item["premium"]),
-                    int(item["spam_block"]),
+                    item["premium"],
+                    item["spam_block"],
                     item["title"],
                     json.dumps(item),
                 )
                 for item in all_items
-                if item.get("item_id")
+                if item.get("item_id") is not None
             ],
         )
         await db.commit()
